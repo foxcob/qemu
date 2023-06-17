@@ -1097,6 +1097,7 @@ void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
             } else {
                 qemu_log(" env->regs[R_EAX]=" TARGET_FMT_lx, env->regs[R_EAX]);
             }
+            qemu_log(" CPU=%d", CPU(cpu)->cpu_index);
             qemu_log("\n");
             log_cpu_state(CPU(cpu), CPU_DUMP_CCOP);
 #if 0
