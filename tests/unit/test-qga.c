@@ -665,6 +665,36 @@ static void test_qga_blockedrpcs(gconstpointer data)
     fixture_tear_down(&fix, NULL);
 }
 
+static void test_qga_allowedrpcs(gconstpointer data)
+{
+    TestFixture fix;
+    QDict *ret, *error;
+    const gchar *class, *desc;
+
+    fixture_setup(&fix, "-a guest-ping,guest-get-time", NULL);
+
+    /* check allowed RPCs */
+    ret = qmp_fd(fix.fd, "{'execute': 'guest-ping'}");
+    qmp_assert_no_error(ret);
+    qobject_unref(ret);
+
+    ret = qmp_fd(fix.fd, "{'execute': 'guest-get-time'}");
+    qmp_assert_no_error(ret);
+    qobject_unref(ret);
+
+    /* check something else */
+    ret = qmp_fd(fix.fd, "{'execute': 'guest-get-fsinfo'}");
+    g_assert_nonnull(ret);
+    error = qdict_get_qdict(ret, "error");
+    class = qdict_get_try_str(error, "class");
+    desc = qdict_get_try_str(error, "desc");
+    g_assert_cmpstr(class, ==, "CommandNotFound");
+    g_assert_nonnull(g_strstr_len(desc, -1, "has been disabled"));
+    qobject_unref(ret);
+
+    fixture_tear_down(&fix, NULL);
+}
+
 static void test_qga_config(gconstpointer data)
 {
     GError *error = NULL;
@@ -792,7 +822,7 @@ static void test_qga_guest_exec(gconstpointer fix)
 
     /* exec 'echo foo bar' */
     ret = qmp_fd(fixture->fd, "{'execute': 'guest-exec', 'arguments': {"
-                 " 'path': '/bin/echo', 'arg': [ '-n', '\" test_str \"' ],"
+                 " 'path': 'echo', 'arg': [ '-n', '\" test_str \"' ],"
                  " 'capture-output': true } }");
     g_assert_nonnull(ret);
     qmp_assert_no_error(ret);
@@ -853,7 +883,7 @@ static void test_qga_guest_exec_separated(gconstpointer fix)
 
     /* exec 'echo foo bar' */
     ret = qmp_fd(fixture->fd, "{'execute': 'guest-exec', 'arguments': {"
-                 " 'path': '/bin/bash',"
+                 " 'path': 'bash',"
                  " 'arg': [ '-c', 'for i in $(seq 4); do if (( $i %% 2 )); then echo stdout; else echo stderr 1>&2; fi; done;' ],"
                  " 'capture-output': 'separated' } }");
     g_assert_nonnull(ret);
@@ -894,7 +924,7 @@ static void test_qga_guest_exec_merged(gconstpointer fix)
 
     /* exec 'echo foo bar' */
     ret = qmp_fd(fixture->fd, "{'execute': 'guest-exec', 'arguments': {"
-                 " 'path': '/bin/bash',"
+                 " 'path': 'bash',"
                  " 'arg': [ '-c', 'for i in $(seq 4); do if (( $i %% 2 )); then echo stdout; else echo stderr 1>&2; fi; done;' ],"
                  " 'capture-output': 'merged' } }");
     g_assert_nonnull(ret);
@@ -1090,6 +1120,7 @@ int main(int argc, char **argv)
                          test_qga_fsfreeze_status);
 
     g_test_add_data_func("/qga/blockedrpcs", NULL, test_qga_blockedrpcs);
+    g_test_add_data_func("/qga/allowedrpcs", NULL, test_qga_allowedrpcs);
     g_test_add_data_func("/qga/config", NULL, test_qga_config);
     g_test_add_data_func("/qga/guest-exec", &fix, test_qga_guest_exec);
     g_test_add_data_func("/qga/guest-exec-separated", &fix,

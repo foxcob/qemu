@@ -12,30 +12,25 @@
 #include "qemu/error-report.h"
 #include "exec/exec-all.h"
 #include "exec/translator.h"
-#include "exec/translate-all.h"
 #include "exec/plugin-gen.h"
 #include "tcg/tcg-op-common.h"
+#include "internal-target.h"
 
-static void gen_io_start(void)
+static void set_can_do_io(DisasContextBase *db, bool val)
 {
-    tcg_gen_st_i32(tcg_constant_i32(1), cpu_env,
-                   offsetof(ArchCPU, parent_obj.can_do_io) -
-                   offsetof(ArchCPU, env));
+    if (db->saved_can_do_io != val) {
+        db->saved_can_do_io = val;
+
+        QEMU_BUILD_BUG_ON(sizeof_field(CPUState, neg.can_do_io) != 1);
+        tcg_gen_st8_i32(tcg_constant_i32(val), tcg_env,
+                        offsetof(ArchCPU, parent_obj.neg.can_do_io) -
+                        offsetof(ArchCPU, env));
+    }
 }
 
 bool translator_io_start(DisasContextBase *db)
 {
-    uint32_t cflags = tb_cflags(db->tb);
-
-    if (!(cflags & CF_USE_ICOUNT)) {
-        return false;
-    }
-    if (db->num_insns == db->max_insns && (cflags & CF_LAST_IO)) {
-        /* Already started in translator_loop. */
-        return true;
-    }
-
-    gen_io_start();
+    set_can_do_io(db, true);
 
     /*
      * Ensure that this instruction will be the last in the TB.
@@ -47,14 +42,17 @@ bool translator_io_start(DisasContextBase *db)
     return true;
 }
 
-static TCGOp *gen_tb_start(uint32_t cflags)
+static TCGOp *gen_tb_start(DisasContextBase *db, uint32_t cflags)
 {
-    TCGv_i32 count = tcg_temp_new_i32();
+    TCGv_i32 count = NULL;
     TCGOp *icount_start_insn = NULL;
 
-    tcg_gen_ld_i32(count, cpu_env,
-                   offsetof(ArchCPU, neg.icount_decr.u32) -
-                   offsetof(ArchCPU, env));
+    if ((cflags & CF_USE_ICOUNT) || !(cflags & CF_NOIRQ)) {
+        count = tcg_temp_new_i32();
+        tcg_gen_ld_i32(count, tcg_env,
+                       offsetof(ArchCPU, parent_obj.neg.icount_decr.u32)
+                       - offsetof(ArchCPU, env));
+    }
 
     if (cflags & CF_USE_ICOUNT) {
         /*
@@ -81,20 +79,17 @@ static TCGOp *gen_tb_start(uint32_t cflags)
     }
 
     if (cflags & CF_USE_ICOUNT) {
-        tcg_gen_st16_i32(count, cpu_env,
-                         offsetof(ArchCPU, neg.icount_decr.u16.low) -
-                         offsetof(ArchCPU, env));
-        /*
-         * cpu->can_do_io is cleared automatically here at the beginning of
-         * each translation block.  The cost is minimal and only paid for
-         * -icount, plus it would be very easy to forget doing it in the
-         * translator. Doing it here means we don't need a gen_io_end() to
-         * go with gen_io_start().
-         */
-        tcg_gen_st_i32(tcg_constant_i32(0), cpu_env,
-                       offsetof(ArchCPU, parent_obj.can_do_io) -
-                       offsetof(ArchCPU, env));
+        tcg_gen_st16_i32(count, tcg_env,
+                         offsetof(ArchCPU, parent_obj.neg.icount_decr.u16.low)
+                         - offsetof(ArchCPU, env));
     }
+
+    /*
+     * cpu->neg.can_do_io is set automatically here at the beginning of
+     * each translation block.  The cost is minimal, plus it would be
+     * very easy to forget doing it in the translator.
+     */
+    set_can_do_io(db, db->max_insns == 1);
 
     return icount_start_insn;
 }
@@ -117,7 +112,7 @@ static void gen_tb_end(const TranslationBlock *tb, uint32_t cflags,
     }
 }
 
-bool translator_use_goto_tb(DisasContextBase *db, target_ulong dest)
+bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
 {
     /* Suppress goto_tb if requested. */
     if (tb_cflags(db->tb) & CF_NO_GOTO_TB) {
@@ -129,8 +124,8 @@ bool translator_use_goto_tb(DisasContextBase *db, target_ulong dest)
 }
 
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
-                     target_ulong pc, void *host_pc,
-                     const TranslatorOps *ops, DisasContextBase *db)
+                     vaddr pc, void *host_pc, const TranslatorOps *ops,
+                     DisasContextBase *db)
 {
     uint32_t cflags = tb_cflags(tb);
     TCGOp *icount_start_insn;
@@ -144,22 +139,20 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
     db->num_insns = 0;
     db->max_insns = *max_insns;
     db->singlestep_enabled = cflags & CF_SINGLE_STEP;
+    db->saved_can_do_io = -1;
     db->host_addr[0] = host_pc;
     db->host_addr[1] = NULL;
-
-#ifdef CONFIG_USER_ONLY
-    page_protect(pc);
-#endif
 
     ops->init_disas_context(db, cpu);
     tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
 
     /* Start translating.  */
-    icount_start_insn = gen_tb_start(cflags);
+    icount_start_insn = gen_tb_start(db, cflags);
     ops->tb_start(db, cpu);
     tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
 
     plugin_enabled = plugin_gen_tb_start(cpu, db, cflags & CF_MEMI_ONLY);
+    db->plugin_enabled = plugin_enabled;
 
     while (true) {
         *max_insns = ++db->num_insns;
@@ -170,19 +163,17 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
             plugin_gen_insn_start(cpu, db);
         }
 
-        /* Disassemble one instruction.  The translate_insn hook should
-           update db->pc_next and db->is_jmp to indicate what should be
-           done next -- either exiting this loop or locate the start of
-           the next instruction.  */
-        if (db->num_insns == db->max_insns && (cflags & CF_LAST_IO)) {
+        /*
+         * Disassemble one instruction.  The translate_insn hook should
+         * update db->pc_next and db->is_jmp to indicate what should be
+         * done next -- either exiting this loop or locate the start of
+         * the next instruction.
+         */
+        if (db->num_insns == db->max_insns) {
             /* Accept I/O on the last instruction.  */
-            gen_io_start();
-            ops->translate_insn(db, cpu);
-        } else {
-            /* we should only see CF_MEMI_ONLY for io_recompile */
-            tcg_debug_assert(!(cflags & CF_MEMI_ONLY));
-            ops->translate_insn(db, cpu);
+            set_can_do_io(db, true);
         }
+        ops->translate_insn(db, cpu);
 
         /*
          * We can't instrument after instructions that change control
@@ -215,7 +206,7 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
     gen_tb_end(tb, cflags, icount_start_insn, db->num_insns);
 
     if (plugin_enabled) {
-        plugin_gen_tb_end(cpu);
+        plugin_gen_tb_end(cpu, db->num_insns);
     }
 
     /* The disas_log hook may use these values rather than recompute.  */
@@ -235,10 +226,10 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
 }
 
 static void *translator_access(CPUArchState *env, DisasContextBase *db,
-                               target_ulong pc, size_t len)
+                               vaddr pc, size_t len)
 {
     void *host;
-    target_ulong base, end;
+    vaddr base, end;
     TranslationBlock *tb;
 
     tb = db->tb;
@@ -256,22 +247,36 @@ static void *translator_access(CPUArchState *env, DisasContextBase *db,
         host = db->host_addr[1];
         base = TARGET_PAGE_ALIGN(db->pc_first);
         if (host == NULL) {
-            tb_page_addr_t phys_page =
-                get_page_addr_code_hostp(env, base, &db->host_addr[1]);
+            tb_page_addr_t page0, old_page1, new_page1;
+
+            new_page1 = get_page_addr_code_hostp(env, base, &db->host_addr[1]);
 
             /*
              * If the second page is MMIO, treat as if the first page
              * was MMIO as well, so that we do not cache the TB.
              */
-            if (unlikely(phys_page == -1)) {
+            if (unlikely(new_page1 == -1)) {
+                tb_unlock_pages(tb);
                 tb_set_page_addr0(tb, -1);
                 return NULL;
             }
 
-            tb_set_page_addr1(tb, phys_page);
-#ifdef CONFIG_USER_ONLY
-            page_protect(end);
-#endif
+            /*
+             * If this is not the first time around, and page1 matches,
+             * then we already have the page locked.  Alternately, we're
+             * not doing anything to prevent the PTE from changing, so
+             * we might wind up with a different page, requiring us to
+             * re-do the locking.
+             */
+            old_page1 = tb_page_addr1(tb);
+            if (likely(new_page1 != old_page1)) {
+                page0 = tb_page_addr0(tb);
+                if (unlikely(old_page1 != -1)) {
+                    tb_unlock_page1(page0, old_page1);
+                }
+                tb_set_page_addr1(tb, new_page1);
+                tb_lock_page1(page0, new_page1);
+            }
             host = db->host_addr[1];
         }
 

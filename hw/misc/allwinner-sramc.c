@@ -116,7 +116,7 @@ static const VMStateDescription allwinner_sramc_vmstate = {
     .name = "allwinner-sramc",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(sram_ver, AwSRAMCState),
         VMSTATE_UINT32(sram_soft_entry_reg0, AwSRAMCState),
         VMSTATE_END_OF_LIST()
@@ -159,6 +159,7 @@ static const TypeInfo allwinner_sramc_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_init = allwinner_sramc_init,
     .instance_size = sizeof(AwSRAMCState),
+    .class_size    = sizeof(AwSRAMCClass),
     .class_init    = allwinner_sramc_class_init,
 };
 

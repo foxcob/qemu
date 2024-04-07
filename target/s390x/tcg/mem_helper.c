@@ -358,7 +358,7 @@ static int mmu_idx_from_as(uint8_t as)
 static uint32_t do_helper_nc(CPUS390XState *env, uint32_t l, uint64_t dest,
                              uint64_t src, uintptr_t ra)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca1, srca2, desta;
     uint32_t i;
     uint8_t c = 0;
@@ -392,7 +392,7 @@ uint32_t HELPER(nc)(CPUS390XState *env, uint32_t l, uint64_t dest,
 static uint32_t do_helper_xc(CPUS390XState *env, uint32_t l, uint64_t dest,
                              uint64_t src, uintptr_t ra)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca1, srca2, desta;
     uint32_t i;
     uint8_t c = 0;
@@ -433,7 +433,7 @@ uint32_t HELPER(xc)(CPUS390XState *env, uint32_t l, uint64_t dest,
 static uint32_t do_helper_oc(CPUS390XState *env, uint32_t l, uint64_t dest,
                              uint64_t src, uintptr_t ra)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca1, srca2, desta;
     uint32_t i;
     uint8_t c = 0;
@@ -467,7 +467,7 @@ uint32_t HELPER(oc)(CPUS390XState *env, uint32_t l, uint64_t dest,
 static uint32_t do_helper_mvc(CPUS390XState *env, uint32_t l, uint64_t dest,
                               uint64_t src, uintptr_t ra)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca, desta;
     uint32_t i;
 
@@ -508,12 +508,13 @@ void HELPER(mvc)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 /* move right to left */
 void HELPER(mvcrl)(CPUS390XState *env, uint64_t l, uint64_t dest, uint64_t src)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     const uint64_t ra = GETPC();
     S390Access srca, desta;
     int32_t i;
 
     /* MVCRL always copies one more byte than specified - maximum is 256 */
+    l &= 0xff;
     l++;
 
     access_prepare(&srca, env, src, l, MMU_DATA_LOAD, mmu_idx, ra);
@@ -528,7 +529,7 @@ void HELPER(mvcrl)(CPUS390XState *env, uint64_t l, uint64_t dest, uint64_t src)
 /* move inverse  */
 void HELPER(mvcin)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca, desta;
     uintptr_t ra = GETPC();
     int i;
@@ -549,7 +550,7 @@ void HELPER(mvcin)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 /* move numerics  */
 void HELPER(mvn)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca1, srca2, desta;
     uintptr_t ra = GETPC();
     int i;
@@ -571,7 +572,7 @@ void HELPER(mvn)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 /* move with offset  */
 void HELPER(mvo)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     /* MVO always processes one more byte than specified - maximum is 16 */
     const int len_dest = (l >> 4) + 1;
     const int len_src = (l & 0xf) + 1;
@@ -605,7 +606,7 @@ void HELPER(mvo)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 /* move zones  */
 void HELPER(mvz)(CPUS390XState *env, uint32_t l, uint64_t dest, uint64_t src)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     S390Access srca1, srca2, desta;
     uintptr_t ra = GETPC();
     int i;
@@ -665,6 +666,11 @@ uint32_t HELPER(clm)(CPUS390XState *env, uint32_t r1, uint32_t mask,
 
     HELPER_LOG("%s: r1 0x%x mask 0x%x addr 0x%" PRIx64 "\n", __func__, r1,
                mask, addr);
+
+    if (!mask) {
+        /* Recognize access exceptions for the first byte */
+        probe_read(env, addr, 1, s390x_env_mmu_index(env, false), ra);
+    }
 
     while (mask) {
         if (mask & 8) {
@@ -887,7 +893,7 @@ uint32_t HELPER(mvpg)(CPUS390XState *env, uint64_t r0, uint32_t r1, uint32_t r2)
 {
     const uint64_t src = get_address(env, r2) & TARGET_PAGE_MASK;
     const uint64_t dst = get_address(env, r1) & TARGET_PAGE_MASK;
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     const bool f = extract64(r0, 11, 1);
     const bool s = extract64(r0, 10, 1);
     const bool cco = extract64(r0, 8, 1);
@@ -940,7 +946,7 @@ inject_exc:
 /* string copy */
 uint32_t HELPER(mvst)(CPUS390XState *env, uint32_t r1, uint32_t r2)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     const uint64_t d = get_address(env, r1);
     const uint64_t s = get_address(env, r2);
     const uint8_t c = env->regs[0];
@@ -1021,7 +1027,7 @@ static inline uint32_t do_mvcl(CPUS390XState *env,
                                uint64_t *src, uint64_t *srclen,
                                uint16_t pad, int wordsize, uintptr_t ra)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     int len = MIN(*destlen, -(*dest | TARGET_PAGE_MASK));
     S390Access srca, desta;
     int i, cc;
@@ -1078,7 +1084,7 @@ static inline uint32_t do_mvcl(CPUS390XState *env,
 /* move long */
 uint32_t HELPER(mvcl)(CPUS390XState *env, uint32_t r1, uint32_t r2)
 {
-    const int mmu_idx = cpu_mmu_index(env, false);
+    const int mmu_idx = s390x_env_mmu_index(env, false);
     uintptr_t ra = GETPC();
     uint64_t destlen = env->regs[r1 + 1] & 0xffffff;
     uint64_t dest = get_address(env, r1);
@@ -1736,7 +1742,7 @@ uint32_t HELPER(trXX)(CPUS390XState *env, uint32_t r1, uint32_t r2,
 static uint32_t do_csst(CPUS390XState *env, uint32_t r3, uint64_t a1,
                         uint64_t a2, bool parallel)
 {
-    uint32_t mem_idx = cpu_mmu_index(env, false);
+    uint32_t mem_idx = s390x_env_mmu_index(env, false);
     MemOpIdx oi16 = make_memop_idx(MO_TE | MO_128, mem_idx);
     MemOpIdx oi8 = make_memop_idx(MO_TE | MO_64, mem_idx);
     MemOpIdx oi4 = make_memop_idx(MO_TE | MO_32, mem_idx);
@@ -2355,7 +2361,7 @@ void HELPER(purge)(CPUS390XState *env)
 }
 
 /* load real address */
-uint64_t HELPER(lra)(CPUS390XState *env, uint64_t addr)
+uint64_t HELPER(lra)(CPUS390XState *env, uint64_t r1, uint64_t addr)
 {
     uint64_t asc = env->psw.mask & PSW_MASK_ASC;
     uint64_t ret, tec;
@@ -2369,7 +2375,7 @@ uint64_t HELPER(lra)(CPUS390XState *env, uint64_t addr)
     exc = mmu_translate(env, addr, MMU_S390_LRA, asc, &ret, &flags, &tec);
     if (exc) {
         cc = 3;
-        ret = exc | 0x80000000;
+        ret = (r1 & 0xFFFFFFFF00000000ULL) | exc | 0x80000000;
     } else {
         cc = 0;
         ret |= addr & ~TARGET_PAGE_MASK;
@@ -2861,12 +2867,14 @@ uint32_t HELPER(cu42)(CPUS390XState *env, uint32_t r1, uint32_t r2, uint32_t m3)
 void probe_write_access(CPUS390XState *env, uint64_t addr, uint64_t len,
                         uintptr_t ra)
 {
+    const int mmu_idx = s390x_env_mmu_index(env, false);
+
     /* test the actual access, not just any access to the page due to LAP */
     while (len) {
         const uint64_t pagelen = -(addr | TARGET_PAGE_MASK);
         const uint64_t curlen = MIN(pagelen, len);
 
-        probe_write(env, addr, curlen, cpu_mmu_index(env, false), ra);
+        probe_write(env, addr, curlen, mmu_idx, ra);
         addr = wrap_address(env, addr + curlen);
         len -= curlen;
     }

@@ -61,12 +61,17 @@ struct RISCVCPUConfig {
     bool ext_zksed;
     bool ext_zksh;
     bool ext_zkt;
-    bool ext_ifencei;
-    bool ext_icsr;
-    bool ext_icbom;
-    bool ext_icboz;
+    bool ext_zifencei;
+    bool ext_zicntr;
+    bool ext_zicsr;
+    bool ext_zicbom;
+    bool ext_zicbop;
+    bool ext_zicboz;
     bool ext_zicond;
+    bool ext_zihintntl;
     bool ext_zihintpause;
+    bool ext_zihpm;
+    bool ext_ztso;
     bool ext_smstateen;
     bool ext_sstc;
     bool ext_svadu;
@@ -74,7 +79,12 @@ struct RISCVCPUConfig {
     bool ext_svnapot;
     bool ext_svpbmt;
     bool ext_zdinx;
+    bool ext_zaamo;
+    bool ext_zacas;
+    bool ext_zalrsc;
     bool ext_zawrs;
+    bool ext_zfa;
+    bool ext_zfbfmin;
     bool ext_zfh;
     bool ext_zfhmin;
     bool ext_zfinx;
@@ -83,18 +93,49 @@ struct RISCVCPUConfig {
     bool ext_zve32f;
     bool ext_zve64f;
     bool ext_zve64d;
+    bool ext_zvbb;
+    bool ext_zvbc;
+    bool ext_zvkb;
+    bool ext_zvkg;
+    bool ext_zvkned;
+    bool ext_zvknha;
+    bool ext_zvknhb;
+    bool ext_zvksed;
+    bool ext_zvksh;
+    bool ext_zvkt;
+    bool ext_zvkn;
+    bool ext_zvknc;
+    bool ext_zvkng;
+    bool ext_zvks;
+    bool ext_zvksc;
+    bool ext_zvksg;
     bool ext_zmmul;
+    bool ext_zvfbfmin;
+    bool ext_zvfbfwma;
     bool ext_zvfh;
     bool ext_zvfhmin;
     bool ext_smaia;
     bool ext_ssaia;
     bool ext_sscofpmf;
+    bool ext_smepmp;
     bool rvv_ta_all_1s;
     bool rvv_ma_all_1s;
 
     uint32_t mvendorid;
     uint64_t marchid;
     uint64_t mimpid;
+
+    /* Named features  */
+    bool ext_svade;
+    bool ext_zic64b;
+
+    /*
+     * Always 'true' booleans for named features
+     * TCG always implement/can't be user disabled,
+     * based on spec version.
+     */
+    bool has_priv_1_12;
+    bool has_priv_1_11;
 
     /* Vendor-specific custom extensions */
     bool ext_xtheadba;
@@ -110,18 +151,14 @@ struct RISCVCPUConfig {
     bool ext_xtheadsync;
     bool ext_XVentanaCondOps;
 
-    uint8_t pmu_num;
-    char *priv_spec;
-    char *user_spec;
-    char *bext_spec;
-    char *vext_spec;
-    uint16_t vlen;
+    uint32_t pmu_mask;
+    uint16_t vlenb;
     uint16_t elen;
     uint16_t cbom_blocksize;
+    uint16_t cbop_blocksize;
     uint16_t cboz_blocksize;
     bool mmu;
     bool pmp;
-    bool epmp;
     bool debug;
     bool misa_w;
 
@@ -133,4 +170,41 @@ struct RISCVCPUConfig {
 };
 
 typedef struct RISCVCPUConfig RISCVCPUConfig;
+
+/* Helper functions to test for extensions.  */
+
+static inline bool always_true_p(const RISCVCPUConfig *cfg __attribute__((__unused__)))
+{
+    return true;
+}
+
+static inline bool has_xthead_p(const RISCVCPUConfig *cfg)
+{
+    return cfg->ext_xtheadba || cfg->ext_xtheadbb ||
+           cfg->ext_xtheadbs || cfg->ext_xtheadcmo ||
+           cfg->ext_xtheadcondmov ||
+           cfg->ext_xtheadfmemidx || cfg->ext_xtheadfmv ||
+           cfg->ext_xtheadmac || cfg->ext_xtheadmemidx ||
+           cfg->ext_xtheadmempair || cfg->ext_xtheadsync;
+}
+
+#define MATERIALISE_EXT_PREDICATE(ext) \
+    static inline bool has_ ## ext ## _p(const RISCVCPUConfig *cfg) \
+    { \
+        return cfg->ext_ ## ext ; \
+    }
+
+MATERIALISE_EXT_PREDICATE(xtheadba)
+MATERIALISE_EXT_PREDICATE(xtheadbb)
+MATERIALISE_EXT_PREDICATE(xtheadbs)
+MATERIALISE_EXT_PREDICATE(xtheadcmo)
+MATERIALISE_EXT_PREDICATE(xtheadcondmov)
+MATERIALISE_EXT_PREDICATE(xtheadfmemidx)
+MATERIALISE_EXT_PREDICATE(xtheadfmv)
+MATERIALISE_EXT_PREDICATE(xtheadmac)
+MATERIALISE_EXT_PREDICATE(xtheadmemidx)
+MATERIALISE_EXT_PREDICATE(xtheadmempair)
+MATERIALISE_EXT_PREDICATE(xtheadsync)
+MATERIALISE_EXT_PREDICATE(XVentanaCondOps)
+
 #endif

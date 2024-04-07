@@ -43,6 +43,7 @@ enum {
     VIRTIO_PCI_FLAG_INIT_FLR_BIT,
     VIRTIO_PCI_FLAG_AER_BIT,
     VIRTIO_PCI_FLAG_ATS_PAGE_ALIGNED_BIT,
+    VIRTIO_PCI_FLAG_VDPA_BIT,
 };
 
 /* Need to activate work-arounds for buggy guests at vmstate load. */
@@ -88,6 +89,9 @@ enum {
 /* Page Aligned Address space Translation Service */
 #define VIRTIO_PCI_FLAG_ATS_PAGE_ALIGNED \
   (1 << VIRTIO_PCI_FLAG_ATS_PAGE_ALIGNED_BIT)
+
+/* VDPA supported flags */
+#define VIRTIO_PCI_FLAG_VDPA (1 << VIRTIO_PCI_FLAG_VDPA_BIT)
 
 typedef struct {
     MSIMessage msg;
@@ -140,6 +144,7 @@ struct VirtIOPCIProxy {
         };
         VirtIOPCIRegion regs[5];
     };
+    VirtIOPCIRegion lm;
     MemoryRegion modern_bar;
     MemoryRegion io_bar;
     uint32_t legacy_io_bar_idx;
@@ -246,6 +251,7 @@ typedef struct VirtioPCIDeviceTypeInfo {
     size_t instance_size;
     size_t class_size;
     void (*instance_init)(Object *obj);
+    void (*instance_finalize)(Object *obj);
     void (*class_init)(ObjectClass *klass, void *data);
     InterfaceInfo *interfaces;
 } VirtioPCIDeviceTypeInfo;
@@ -264,4 +270,8 @@ unsigned virtio_pci_optimal_num_queues(unsigned fixed_queues);
 void virtio_pci_set_guest_notifier_fd_handler(VirtIODevice *vdev, VirtQueue *vq,
                                               int n, bool assign,
                                               bool with_irqfd);
+
+int virtio_pci_add_shm_cap(VirtIOPCIProxy *proxy, uint8_t bar, uint64_t offset,
+                           uint64_t length, uint8_t id);
+
 #endif

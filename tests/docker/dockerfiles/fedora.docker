@@ -1,10 +1,10 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all fedora-37 qemu
+#  $ lcitool dockerfile --layers all fedora-38 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
-FROM registry.fedoraproject.org/fedora:37
+FROM registry.fedoraproject.org/fedora:38
 
 RUN dnf install -y nosync && \
     printf '#!/bin/sh\n\
@@ -82,6 +82,7 @@ exec "$@"\n' > /usr/bin/nosync && \
                libubsan \
                liburing-devel \
                libusbx-devel \
+               libxdp-devel \
                libzstd-devel \
                llvm \
                lttng-ust-devel \
@@ -98,6 +99,7 @@ exec "$@"\n' > /usr/bin/nosync && \
                openssh-clients \
                pam-devel \
                pcre-static \
+               pipewire-devel \
                pixman-devel \
                pkgconfig \
                pulseaudio-libs-devel \
@@ -116,6 +118,7 @@ exec "$@"\n' > /usr/bin/nosync && \
                sparse \
                spice-protocol \
                spice-server-devel \
+               swtpm \
                systemd-devel \
                systemtap-sdt-devel \
                tar \

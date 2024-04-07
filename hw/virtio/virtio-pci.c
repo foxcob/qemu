@@ -97,7 +97,7 @@ static const VMStateDescription vmstate_virtio_pci_modern_queue_state = {
     .name = "virtio_pci/modern_queue_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT16(num, VirtIOPCIQueue),
         VMSTATE_UNUSED(1), /* enabled was stored as be16 */
         VMSTATE_BOOL(enabled, VirtIOPCIQueue),
@@ -120,7 +120,7 @@ static const VMStateDescription vmstate_virtio_pci_modern_state_sub = {
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = &virtio_pci_modern_state_needed,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT32(dfselect, VirtIOPCIProxy),
         VMSTATE_UINT32(gfselect, VirtIOPCIProxy),
         VMSTATE_UINT32_ARRAY(guest_features, VirtIOPCIProxy, 2),
@@ -135,10 +135,10 @@ static const VMStateDescription vmstate_virtio_pci = {
     .name = "virtio_pci",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (const VMStateField[]) {
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (const VMStateDescription*[]) {
+    .subsections = (const VMStateDescription * const []) {
         &vmstate_virtio_pci_modern_state_sub,
         NULL
     }
@@ -332,7 +332,6 @@ static int virtio_pci_ioeventfd_assign(DeviceState *d, EventNotifier *notifier,
     VirtQueue *vq = virtio_get_queue(vdev, n);
     bool legacy = virtio_pci_legacy(proxy);
     bool modern = virtio_pci_modern(proxy);
-    bool fast_mmio = kvm_ioeventfd_any_length_enabled();
     bool modern_pio = proxy->flags & VIRTIO_PCI_FLAG_MODERN_PIO_NOTIFY;
     MemoryRegion *modern_mr = &proxy->notify.mr;
     MemoryRegion *modern_notify_mr = &proxy->notify_pio.mr;
@@ -343,13 +342,8 @@ static int virtio_pci_ioeventfd_assign(DeviceState *d, EventNotifier *notifier,
 
     if (assign) {
         if (modern) {
-            if (fast_mmio) {
-                memory_region_add_eventfd(modern_mr, modern_addr, 0,
-                                          false, n, notifier);
-            } else {
-                memory_region_add_eventfd(modern_mr, modern_addr, 2,
-                                          false, n, notifier);
-            }
+            memory_region_add_eventfd(modern_mr, modern_addr, 0,
+                                      false, n, notifier);
             if (modern_pio) {
                 memory_region_add_eventfd(modern_notify_mr, 0, 2,
                                               true, n, notifier);
@@ -361,13 +355,8 @@ static int virtio_pci_ioeventfd_assign(DeviceState *d, EventNotifier *notifier,
         }
     } else {
         if (modern) {
-            if (fast_mmio) {
-                memory_region_del_eventfd(modern_mr, modern_addr, 0,
-                                          false, n, notifier);
-            } else {
-                memory_region_del_eventfd(modern_mr, modern_addr, 2,
-                                          false, n, notifier);
-            }
+            memory_region_del_eventfd(modern_mr, modern_addr, 0,
+                                      false, n, notifier);
             if (modern_pio) {
                 memory_region_del_eventfd(modern_notify_mr, 0, 2,
                                           true, n, notifier);
@@ -780,15 +769,15 @@ static void virtio_write_config(PCIDevice *pci_dev, uint32_t address,
                                                                   pci_cfg_data),
                        sizeof cfg->pci_cfg_data)) {
         uint32_t off;
-        uint32_t len;
+        uint32_t caplen;
 
         cfg = (void *)(proxy->pci_dev.config + proxy->config_cap);
         off = le32_to_cpu(cfg->cap.offset);
-        len = le32_to_cpu(cfg->cap.length);
+        caplen = le32_to_cpu(cfg->cap.length);
 
-        if (len == 1 || len == 2 || len == 4) {
-            assert(len <= sizeof cfg->pci_cfg_data);
-            virtio_address_space_write(proxy, off, cfg->pci_cfg_data, len);
+        if (caplen == 1 || caplen == 2 || caplen == 4) {
+            assert(caplen <= sizeof cfg->pci_cfg_data);
+            virtio_address_space_write(proxy, off, cfg->pci_cfg_data, caplen);
         }
     }
 }
@@ -804,15 +793,15 @@ static uint32_t virtio_read_config(PCIDevice *pci_dev,
                                                                   pci_cfg_data),
                        sizeof cfg->pci_cfg_data)) {
         uint32_t off;
-        uint32_t len;
+        uint32_t caplen;
 
         cfg = (void *)(proxy->pci_dev.config + proxy->config_cap);
         off = le32_to_cpu(cfg->cap.offset);
-        len = le32_to_cpu(cfg->cap.length);
+        caplen = le32_to_cpu(cfg->cap.length);
 
-        if (len == 1 || len == 2 || len == 4) {
-            assert(len <= sizeof cfg->pci_cfg_data);
-            virtio_address_space_read(proxy, off, cfg->pci_cfg_data, len);
+        if (caplen == 1 || caplen == 2 || caplen == 4) {
+            assert(caplen <= sizeof cfg->pci_cfg_data);
+            virtio_address_space_read(proxy, off, cfg->pci_cfg_data, caplen);
         }
     }
 
@@ -1435,6 +1424,173 @@ static int virtio_pci_add_mem_cap(VirtIOPCIProxy *proxy,
     return offset;
 }
 
+int virtio_pci_add_shm_cap(VirtIOPCIProxy *proxy,
+                           uint8_t bar, uint64_t offset, uint64_t length,
+                           uint8_t id)
+{
+    struct virtio_pci_cap64 cap = {
+        .cap.cap_len = sizeof cap,
+        .cap.cfg_type = VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
+    };
+
+    cap.cap.bar = bar;
+    cap.cap.length = cpu_to_le32(length);
+    cap.length_hi = cpu_to_le32(length >> 32);
+    cap.cap.offset = cpu_to_le32(offset);
+    cap.offset_hi = cpu_to_le32(offset >> 32);
+    cap.cap.id = id;
+    return virtio_pci_add_mem_cap(proxy, &cap.cap);
+}
+
+/* Called within call_rcu().  */
+static void bitmap_free_region_cache(BitmapMemoryRegionCaches *caches)
+{
+    assert(caches != NULL);
+    address_space_cache_destroy(&caches->bitmap);
+    g_free(caches);
+}
+
+static void lm_disable(VirtIODevice *vdev)
+{
+    BitmapMemoryRegionCaches *caches;
+    caches = qatomic_read(&vdev->caches);
+    qatomic_rcu_set(&vdev->caches, NULL);
+    if (caches) {
+        call_rcu(caches, bitmap_free_region_cache, rcu);
+    }
+}
+
+static void lm_enable(VirtIODevice *vdev)
+{
+    BitmapMemoryRegionCaches *old = vdev->caches;
+    BitmapMemoryRegionCaches *new = NULL;
+    hwaddr addr, end, size;
+    int64_t len;
+
+    addr = vdev->lm_base_addr_low | ((hwaddr)(vdev->lm_base_addr_high) << 32);
+    end = vdev->lm_end_addr_low | ((hwaddr)(vdev->lm_end_addr_high) << 32);
+    size = end - addr;
+    if (size <= 0) {
+        error_report("Invalid lm size.");
+        return;
+    }
+
+    new = g_new0(BitmapMemoryRegionCaches, 1);
+    len = address_space_cache_init(&new->bitmap, vdev->dma_as, addr, size,
+                                   true);
+    if (len < size) {
+        virtio_error(vdev, "Cannot map bitmap");
+        goto err_bitmap;
+    }
+    qatomic_rcu_set(&vdev->caches, new);
+
+    if (old) {
+        call_rcu(old, bitmap_free_region_cache, rcu);
+    }
+
+    return;
+
+err_bitmap:
+    address_space_cache_destroy(&new->bitmap);
+    g_free(new);
+}
+
+static uint64_t virtio_pci_lm_read(void *opaque, hwaddr addr,
+                                       unsigned size)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    hwaddr offset_end = LM_VRING_STATE_OFFSET +
+                        virtio_pci_queue_mem_mult(proxy) * VIRTIO_QUEUE_MAX;
+    uint32_t val;
+    int qid;
+
+    if (vdev == NULL) {
+        return UINT64_MAX;
+    }
+    switch (addr) {
+    case LM_LOGGING_CTRL:
+        val = vdev->lm_logging_ctrl;
+        break;
+    case LM_BASE_ADDR_LOW:
+        val = vdev->lm_base_addr_low;
+        break;
+    case LM_BASE_ADDR_HIGH:
+        val = vdev->lm_base_addr_high;
+        break;
+    case LM_END_ADDR_LOW:
+        val = vdev->lm_end_addr_low;
+        break;
+    case LM_END_ADDR_HIGH:
+        val = vdev->lm_end_addr_high;
+        break;
+    default:
+        if (addr >= LM_VRING_STATE_OFFSET && addr <= offset_end) {
+            qid = (addr - LM_VRING_STATE_OFFSET) /
+                  virtio_pci_queue_mem_mult(proxy);
+            val = virtio_queue_get_vring_states(vdev, qid);
+        } else
+            val = 0;
+
+        break;
+    }
+
+    return val;
+}
+
+static void virtio_pci_lm_write(void *opaque, hwaddr addr,
+                                    uint64_t val, unsigned size)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    hwaddr offset_end = LM_VRING_STATE_OFFSET +
+                        virtio_pci_queue_mem_mult(proxy) * VIRTIO_QUEUE_MAX;
+    int qid;
+
+    if (vdev == NULL) {
+        return;
+    }
+
+    switch (addr) {
+    case LM_LOGGING_CTRL:
+        vdev->lm_logging_ctrl = val;
+        switch (val) {
+        case LM_DISABLE:
+            lm_disable(vdev);
+            break;
+        case LM_ENABLE:
+            lm_enable(vdev);
+            break;
+        default:
+            virtio_error(vdev, "Unsupport LM_LOGGING_CTRL value: %"PRIx64,
+                         val);
+                break;
+        };
+
+        break;
+    case LM_BASE_ADDR_LOW:
+        vdev->lm_base_addr_low = val;
+        break;
+    case LM_BASE_ADDR_HIGH:
+        vdev->lm_base_addr_high = val;
+        break;
+    case LM_END_ADDR_LOW:
+        vdev->lm_end_addr_low = val;
+        break;
+    case LM_END_ADDR_HIGH:
+        vdev->lm_end_addr_high = val;
+        break;
+    default:
+        if (addr >= LM_VRING_STATE_OFFSET && addr <= offset_end) {
+            qid = (addr - LM_VRING_STATE_OFFSET) /
+                  virtio_pci_queue_mem_mult(proxy);
+            virtio_queue_set_vring_states(vdev, qid, val);
+        } else
+            virtio_error(vdev, "Unsupport addr: %"PRIx64, addr);
+        break;
+    }
+}
+
 static uint64_t virtio_pci_common_read(void *opaque, hwaddr addr,
                                        unsigned size)
 {
@@ -1816,6 +1972,15 @@ static void virtio_pci_modern_regions_init(VirtIOPCIProxy *proxy,
         },
         .endianness = DEVICE_LITTLE_ENDIAN,
     };
+    static const MemoryRegionOps lm_ops = {
+        .read = virtio_pci_lm_read,
+        .write = virtio_pci_lm_write,
+        .impl = {
+            .min_access_size = 1,
+            .max_access_size = 4,
+        },
+        .endianness = DEVICE_LITTLE_ENDIAN,
+    };
     g_autoptr(GString) name = g_string_new(NULL);
 
     g_string_printf(name, "virtio-pci-common-%s", vdev_name);
@@ -1852,6 +2017,14 @@ static void virtio_pci_modern_regions_init(VirtIOPCIProxy *proxy,
                           proxy,
                           name->str,
                           proxy->notify_pio.size);
+    if (proxy->flags & VIRTIO_PCI_FLAG_VDPA) {
+        g_string_printf(name, "virtio-pci-lm-%s", vdev_name);
+        memory_region_init_io(&proxy->lm.mr, OBJECT(proxy),
+                          &lm_ops,
+                          proxy,
+                          name->str,
+                          proxy->lm.size);
+    }
 }
 
 static void virtio_pci_modern_region_map(VirtIOPCIProxy *proxy,
@@ -1922,7 +2095,7 @@ static void virtio_pci_device_plugged(DeviceState *d, Error **errp)
     bool modern_pio = proxy->flags & VIRTIO_PCI_FLAG_MODERN_PIO_NOTIFY;
     uint8_t *config;
     uint32_t size;
-    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    VirtIODevice *vdev = virtio_bus_get_device(bus);
 
     /*
      * Virtio capabilities present without
@@ -2014,6 +2187,10 @@ static void virtio_pci_device_plugged(DeviceState *d, Error **errp)
         virtio_pci_modern_mem_region_map(proxy, &proxy->isr, &cap);
         virtio_pci_modern_mem_region_map(proxy, &proxy->device, &cap);
         virtio_pci_modern_mem_region_map(proxy, &proxy->notify, &notify.cap);
+        if (proxy->flags & VIRTIO_PCI_FLAG_VDPA) {
+            memory_region_add_subregion(&proxy->modern_bar,
+                                        proxy->lm.offset, &proxy->lm.mr);
+        }
 
         if (modern_pio) {
             memory_region_init(&proxy->io_bar, OBJECT(proxy),
@@ -2083,6 +2260,9 @@ static void virtio_pci_device_unplugged(DeviceState *d)
         virtio_pci_modern_mem_region_unmap(proxy, &proxy->isr);
         virtio_pci_modern_mem_region_unmap(proxy, &proxy->device);
         virtio_pci_modern_mem_region_unmap(proxy, &proxy->notify);
+        if (proxy->flags & VIRTIO_PCI_FLAG_VDPA) {
+            memory_region_del_subregion(&proxy->modern_bar, &proxy->lm.mr);
+        }
         if (modern_pio) {
             virtio_pci_modern_io_region_unmap(proxy, &proxy->notify_pio);
         }
@@ -2095,10 +2275,6 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
     VirtioPCIClass *k = VIRTIO_PCI_GET_CLASS(pci_dev);
     bool pcie_port = pci_bus_is_express(pci_get_bus(pci_dev)) &&
                      !pci_bus_is_root(pci_get_bus(pci_dev));
-
-    if (kvm_enabled() && !kvm_has_many_ioeventfds()) {
-        proxy->flags &= ~VIRTIO_PCI_FLAG_USE_IOEVENTFD;
-    }
 
     /* fd-based ioevents can't be synchronized in record/replay */
     if (replay_mode != REPLAY_MODE_NONE) {
@@ -2141,9 +2317,17 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
     proxy->notify_pio.type = VIRTIO_PCI_CAP_NOTIFY_CFG;
 
     /* subclasses can enforce modern, so do this unconditionally */
-    memory_region_init(&proxy->modern_bar, OBJECT(proxy), "virtio-pci",
-                       /* PCI BAR regions must be powers of 2 */
-                       pow2ceil(proxy->notify.offset + proxy->notify.size));
+    if (!(proxy->flags & VIRTIO_PCI_FLAG_VDPA)) {
+        memory_region_init(&proxy->modern_bar, OBJECT(proxy), "virtio-pci",
+                           /* PCI BAR regions must be powers of 2 */
+                           pow2ceil(proxy->notify.offset + proxy->notify.size));
+    } else {
+        proxy->lm.offset = proxy->notify.offset + proxy->notify.size;
+        proxy->lm.size = 0x20 + VIRTIO_QUEUE_MAX * 4;
+        memory_region_init(&proxy->modern_bar, OBJECT(proxy), "virtio-pci",
+                           /* PCI BAR regions must be powers of 2 */
+                           pow2ceil(proxy->lm.offset + proxy->lm.size));
+    }
 
     if (proxy->disable_legacy == ON_OFF_AUTO_AUTO) {
         proxy->disable_legacy = pcie_port ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
@@ -2298,6 +2482,8 @@ static Property virtio_pci_properties[] = {
                     VIRTIO_PCI_FLAG_INIT_FLR_BIT, true),
     DEFINE_PROP_BIT("aer", VirtIOPCIProxy, flags,
                     VIRTIO_PCI_FLAG_AER_BIT, false),
+    DEFINE_PROP_BIT("vdpa", VirtIOPCIProxy, flags,
+                    VIRTIO_PCI_FLAG_VDPA_BIT, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -2388,6 +2574,7 @@ void virtio_pci_types_register(const VirtioPCIDeviceTypeInfo *t)
         .parent        = t->parent ? t->parent : TYPE_VIRTIO_PCI,
         .instance_size = t->instance_size,
         .instance_init = t->instance_init,
+        .instance_finalize = t->instance_finalize,
         .class_size    = t->class_size,
         .abstract      = true,
         .interfaces    = t->interfaces,

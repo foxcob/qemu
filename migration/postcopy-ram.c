@@ -77,10 +77,9 @@ int postcopy_notify(enum PostcopyNotifyReason reason, Error **errp)
 {
     struct PostcopyNotifyData pnd;
     pnd.reason = reason;
-    pnd.errp = errp;
 
     return notifier_with_return_list_notify(&postcopy_notifier_list,
-                                            &pnd);
+                                            &pnd, errp);
 }
 
 /*
@@ -102,11 +101,9 @@ void postcopy_thread_create(MigrationIncomingState *mis,
  * are target OS specific.
  */
 #if defined(__linux__)
-
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
-#include <asm/types.h> /* for __u64 */
 #endif
 
 #if defined(__linux__) && defined(__NR_userfaultfd) && defined(CONFIG_EVENTFD)
@@ -272,8 +269,8 @@ static bool request_ufd_features(int ufd, uint64_t features)
         return false;
     }
 
-    ioctl_mask = (__u64)1 << _UFFDIO_REGISTER |
-                 (__u64)1 << _UFFDIO_UNREGISTER;
+    ioctl_mask = 1ULL << _UFFDIO_REGISTER |
+                 1ULL << _UFFDIO_UNREGISTER;
     if ((api_struct.ioctls & ioctl_mask) != ioctl_mask) {
         error_report("Missing userfault features: %" PRIx64,
                      (uint64_t)(~api_struct.ioctls & ioctl_mask));
@@ -286,10 +283,10 @@ static bool request_ufd_features(int ufd, uint64_t features)
 static bool ufd_check_and_apply(int ufd, MigrationIncomingState *mis,
                                 Error **errp)
 {
+    ERRP_GUARD();
     uint64_t asked_features = 0;
     static uint64_t supported_features;
 
-    ERRP_GUARD();
     /*
      * it's not possible to
      * request UFFD_API twice per one fd
@@ -374,6 +371,7 @@ static int test_ramblock_postcopiable(RAMBlock *rb, Error **errp)
  */
 bool postcopy_ram_supported_by_host(MigrationIncomingState *mis, Error **errp)
 {
+    ERRP_GUARD();
     long pagesize = qemu_real_host_page_size();
     int ufd = -1;
     bool ret = false; /* Error unless we change it */
@@ -383,7 +381,6 @@ bool postcopy_ram_supported_by_host(MigrationIncomingState *mis, Error **errp)
     uint64_t feature_mask;
     RAMBlock *block;
 
-    ERRP_GUARD();
     if (qemu_target_page_size() > pagesize) {
         error_setg(errp, "Target page size bigger than host page size");
         goto out;
@@ -408,7 +405,7 @@ bool postcopy_ram_supported_by_host(MigrationIncomingState *mis, Error **errp)
     /*
      * We don't support postcopy with some type of ramblocks.
      *
-     * NOTE: we explicitly ignored ramblock_is_ignored() instead we checked
+     * NOTE: we explicitly ignored migrate_ram_is_ignored() instead we checked
      * all possible ramblocks.  This is because this function can be called
      * when creating the migration object, during the phase RAM_MIGRATABLE
      * is not even properly set for all the ramblocks.
@@ -462,9 +459,9 @@ bool postcopy_ram_supported_by_host(MigrationIncomingState *mis, Error **errp)
         goto out;
     }
 
-    feature_mask = (__u64)1 << _UFFDIO_WAKE |
-                   (__u64)1 << _UFFDIO_COPY |
-                   (__u64)1 << _UFFDIO_ZEROPAGE;
+    feature_mask = 1ULL << _UFFDIO_WAKE |
+                   1ULL << _UFFDIO_COPY |
+                   1ULL << _UFFDIO_ZEROPAGE;
     if ((reg_struct.ioctls & feature_mask) != feature_mask) {
         error_setg(errp, "Missing userfault map features: %" PRIx64,
                    (uint64_t)(~reg_struct.ioctls & feature_mask));
@@ -599,6 +596,30 @@ int postcopy_ram_incoming_cleanup(MigrationIncomingState *mis)
     if (mis->preempt_thread_status == PREEMPT_THREAD_CREATED) {
         /* Notify the fast load thread to quit */
         mis->preempt_thread_status = PREEMPT_THREAD_QUIT;
+        /*
+         * Update preempt_thread_status before reading count.  Note: mutex
+         * lock only provide ACQUIRE semantic, and it doesn't stops this
+         * write to be reordered after reading the count.
+         */
+        smp_mb();
+        /*
+         * It's possible that the preempt thread is still handling the last
+         * pages to arrive which were requested by guest page faults.
+         * Making sure nothing is left behind by waiting on the condvar if
+         * that unlikely case happened.
+         */
+        WITH_QEMU_LOCK_GUARD(&mis->page_request_mutex) {
+            if (qatomic_read(&mis->page_requested_count)) {
+                /*
+                 * It is guaranteed to receive a signal later, because the
+                 * count>0 now, so it's destined to be decreased to zero
+                 * very soon by the preempt thread.
+                 */
+                qemu_cond_wait(&mis->page_request_cond,
+                               &mis->page_request_mutex);
+            }
+        }
+        /* Notify the fast load thread to quit */
         if (mis->postcopy_qemufile_dst) {
             qemu_file_shutdown(mis->postcopy_qemufile_dst);
         }
@@ -709,11 +730,11 @@ static int ram_block_enable_notify(RAMBlock *rb, void *opaque)
         error_report("%s userfault register: %s", __func__, strerror(errno));
         return -1;
     }
-    if (!(reg_struct.ioctls & ((__u64)1 << _UFFDIO_COPY))) {
+    if (!(reg_struct.ioctls & (1ULL << _UFFDIO_COPY))) {
         error_report("%s userfault: Region doesn't support COPY", __func__);
         return -1;
     }
-    if (reg_struct.ioctls & ((__u64)1 << _UFFDIO_ZEROPAGE)) {
+    if (reg_struct.ioctls & (1ULL << _UFFDIO_ZEROPAGE)) {
         qemu_ram_set_uf_zeroable(rb);
     }
 
@@ -1277,8 +1298,20 @@ static int qemu_ufd_copy_ioctl(MigrationIncomingState *mis, void *host_addr,
          */
         if (g_tree_lookup(mis->page_requested, host_addr)) {
             g_tree_remove(mis->page_requested, host_addr);
-            mis->page_requested_count--;
+            int left_pages = qatomic_dec_fetch(&mis->page_requested_count);
+
             trace_postcopy_page_req_del(host_addr, mis->page_requested_count);
+            /* Order the update of count and read of preempt status */
+            smp_mb();
+            if (mis->preempt_thread_status == PREEMPT_THREAD_QUIT &&
+                left_pages == 0) {
+                /*
+                 * This probably means the main thread is waiting for us.
+                 * Notify that we've finished receiving the last requested
+                 * page.
+                 */
+                qemu_cond_signal(&mis->page_request_cond);
+            }
         }
         qemu_mutex_unlock(&mis->page_request_mutex);
         mark_postcopy_blocktime_end((uintptr_t)host_addr);

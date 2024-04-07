@@ -29,7 +29,8 @@
 #include "qemu/atomic128.h"
 #include "trace/trace-root.h"
 #include "tcg/tcg-ldst.h"
-#include "internal.h"
+#include "internal-common.h"
+#include "internal-target.h"
 
 __thread uintptr_t helper_retaddr;
 
@@ -144,7 +145,7 @@ typedef struct PageFlagsNode {
 
 static IntervalTreeRoot pageflags_root;
 
-static PageFlagsNode *pageflags_find(target_ulong start, target_long last)
+static PageFlagsNode *pageflags_find(target_ulong start, target_ulong last)
 {
     IntervalTreeNode *n;
 
@@ -153,7 +154,7 @@ static PageFlagsNode *pageflags_find(target_ulong start, target_long last)
 }
 
 static PageFlagsNode *pageflags_next(PageFlagsNode *p, target_ulong start,
-                                     target_long last)
+                                     target_ulong last)
 {
     IntervalTreeNode *n;
 
@@ -520,19 +521,19 @@ void page_set_flags(target_ulong start, target_ulong last, int flags)
     }
 }
 
-int page_check_range(target_ulong start, target_ulong len, int flags)
+bool page_check_range(target_ulong start, target_ulong len, int flags)
 {
     target_ulong last;
     int locked;  /* tri-state: =0: unlocked, +1: global, -1: local */
-    int ret;
+    bool ret;
 
     if (len == 0) {
-        return 0;  /* trivial length */
+        return true;  /* trivial length */
     }
 
     last = start + len - 1;
     if (last < start) {
-        return -1; /* wrap around */
+        return false; /* wrap around */
     }
 
     locked = have_mmap_lock();
@@ -551,33 +552,33 @@ int page_check_range(target_ulong start, target_ulong len, int flags)
                 p = pageflags_find(start, last);
             }
             if (!p) {
-                ret = -1; /* entire region invalid */
+                ret = false; /* entire region invalid */
                 break;
             }
         }
         if (start < p->itree.start) {
-            ret = -1; /* initial bytes invalid */
+            ret = false; /* initial bytes invalid */
             break;
         }
 
         missing = flags & ~p->flags;
-        if (missing & PAGE_READ) {
-            ret = -1; /* page not readable */
+        if (missing & ~PAGE_WRITE) {
+            ret = false; /* page doesn't match */
             break;
         }
         if (missing & PAGE_WRITE) {
             if (!(p->flags & PAGE_WRITE_ORG)) {
-                ret = -1; /* page not writable */
+                ret = false; /* page not writable */
                 break;
             }
             /* Asking about writable, but has been protected: undo. */
             if (!page_unprotect(start, 0)) {
-                ret = -1;
+                ret = false;
                 break;
             }
             /* TODO: page_unprotect should take a range, not a single page. */
             if (last - start < TARGET_PAGE_SIZE) {
-                ret = 0; /* ok */
+                ret = true; /* ok */
                 break;
             }
             start += TARGET_PAGE_SIZE;
@@ -585,7 +586,7 @@ int page_check_range(target_ulong start, target_ulong len, int flags)
         }
 
         if (last <= p->itree.last) {
-            ret = 0; /* ok */
+            ret = true; /* ok */
             break;
         }
         start = p->itree.last + 1;
@@ -598,20 +599,69 @@ int page_check_range(target_ulong start, target_ulong len, int flags)
     return ret;
 }
 
+bool page_check_range_empty(target_ulong start, target_ulong last)
+{
+    assert(last >= start);
+    assert_memory_lock();
+    return pageflags_find(start, last) == NULL;
+}
+
+target_ulong page_find_range_empty(target_ulong min, target_ulong max,
+                                   target_ulong len, target_ulong align)
+{
+    target_ulong len_m1, align_m1;
+
+    assert(min <= max);
+    assert(max <= GUEST_ADDR_MAX);
+    assert(len != 0);
+    assert(is_power_of_2(align));
+    assert_memory_lock();
+
+    len_m1 = len - 1;
+    align_m1 = align - 1;
+
+    /* Iteratively narrow the search region. */
+    while (1) {
+        PageFlagsNode *p;
+
+        /* Align min and double-check there's enough space remaining. */
+        min = (min + align_m1) & ~align_m1;
+        if (min > max) {
+            return -1;
+        }
+        if (len_m1 > max - min) {
+            return -1;
+        }
+
+        p = pageflags_find(min, min + len_m1);
+        if (p == NULL) {
+            /* Found! */
+            return min;
+        }
+        if (max <= p->itree.last) {
+            /* Existing allocation fills the remainder of the search region. */
+            return -1;
+        }
+        /* Skip across existing allocation. */
+        min = p->itree.last + 1;
+    }
+}
+
 void page_protect(tb_page_addr_t address)
 {
     PageFlagsNode *p;
     target_ulong start, last;
+    int host_page_size = qemu_real_host_page_size();
     int prot;
 
     assert_memory_lock();
 
-    if (qemu_host_page_size <= TARGET_PAGE_SIZE) {
+    if (host_page_size <= TARGET_PAGE_SIZE) {
         start = address & TARGET_PAGE_MASK;
         last = start + TARGET_PAGE_SIZE - 1;
     } else {
-        start = address & qemu_host_page_mask;
-        last = start + qemu_host_page_size - 1;
+        start = address & -host_page_size;
+        last = start + host_page_size - 1;
     }
 
     p = pageflags_find(start, last);
@@ -622,7 +672,7 @@ void page_protect(tb_page_addr_t address)
 
     if (unlikely(p->itree.last < last)) {
         /* More than one protection region covers the one host page. */
-        assert(TARGET_PAGE_SIZE < qemu_host_page_size);
+        assert(TARGET_PAGE_SIZE < host_page_size);
         while ((p = pageflags_next(p, start, last)) != NULL) {
             prot |= p->flags;
         }
@@ -630,7 +680,7 @@ void page_protect(tb_page_addr_t address)
 
     if (prot & PAGE_WRITE) {
         pageflags_set_clear(start, last, 0, PAGE_WRITE);
-        mprotect(g2h_untagged(start), qemu_host_page_size,
+        mprotect(g2h_untagged(start), last - start + 1,
                  prot & (PAGE_READ | PAGE_EXEC) ? PROT_READ : PROT_NONE);
     }
 }
@@ -676,18 +726,19 @@ int page_unprotect(target_ulong address, uintptr_t pc)
         }
 #endif
     } else {
+        int host_page_size = qemu_real_host_page_size();
         target_ulong start, len, i;
         int prot;
 
-        if (qemu_host_page_size <= TARGET_PAGE_SIZE) {
+        if (host_page_size <= TARGET_PAGE_SIZE) {
             start = address & TARGET_PAGE_MASK;
             len = TARGET_PAGE_SIZE;
             prot = p->flags | PAGE_WRITE;
             pageflags_set_clear(start, start + len - 1, PAGE_WRITE, 0);
             current_tb_invalidated = tb_invalidate_phys_page_unwind(start, pc);
         } else {
-            start = address & qemu_host_page_mask;
-            len = qemu_host_page_size;
+            start = address & -host_page_size;
+            len = host_page_size;
             prot = 0;
 
             for (i = 0; i < len; i += TARGET_PAGE_SIZE) {
@@ -721,7 +772,7 @@ int page_unprotect(target_ulong address, uintptr_t pc)
     return current_tb_invalidated ? 2 : 1;
 }
 
-static int probe_access_internal(CPUArchState *env, target_ulong addr,
+static int probe_access_internal(CPUArchState *env, vaddr addr,
                                  int fault_size, MMUAccessType access_type,
                                  bool nonfault, uintptr_t ra)
 {
@@ -745,6 +796,10 @@ static int probe_access_internal(CPUArchState *env, target_ulong addr,
     if (guest_addr_valid_untagged(addr)) {
         int page_flags = page_get_flags(addr);
         if (page_flags & acc_flag) {
+            if ((acc_flag == PAGE_READ || acc_flag == PAGE_WRITE)
+                && cpu_plugin_mem_cbs_enabled(env_cpu(env))) {
+                return TLB_MMIO;
+            }
             return 0; /* success */
         }
         maperr = !(page_flags & PAGE_VALID);
@@ -759,7 +814,7 @@ static int probe_access_internal(CPUArchState *env, target_ulong addr,
     cpu_loop_exit_sigsegv(env_cpu(env), addr, access_type, maperr, ra);
 }
 
-int probe_access_flags(CPUArchState *env, target_ulong addr, int size,
+int probe_access_flags(CPUArchState *env, vaddr addr, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool nonfault, void **phost, uintptr_t ra)
 {
@@ -767,23 +822,23 @@ int probe_access_flags(CPUArchState *env, target_ulong addr, int size,
 
     g_assert(-(addr | TARGET_PAGE_MASK) >= size);
     flags = probe_access_internal(env, addr, size, access_type, nonfault, ra);
-    *phost = flags ? NULL : g2h(env_cpu(env), addr);
+    *phost = (flags & TLB_INVALID_MASK) ? NULL : g2h(env_cpu(env), addr);
     return flags;
 }
 
-void *probe_access(CPUArchState *env, target_ulong addr, int size,
+void *probe_access(CPUArchState *env, vaddr addr, int size,
                    MMUAccessType access_type, int mmu_idx, uintptr_t ra)
 {
     int flags;
 
     g_assert(-(addr | TARGET_PAGE_MASK) >= size);
     flags = probe_access_internal(env, addr, size, access_type, false, ra);
-    g_assert(flags == 0);
+    g_assert((flags & ~TLB_MMIO) == 0);
 
     return size ? g2h(env_cpu(env), addr) : NULL;
 }
 
-tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, target_ulong addr,
+tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
                                         void **hostp)
 {
     int flags;
@@ -809,7 +864,7 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, target_ulong addr,
 typedef struct TargetPageDataNode {
     struct rcu_head rcu;
     IntervalTreeNode itree;
-    char data[TPD_PAGES][TARGET_PAGE_DATA_SIZE] __attribute__((aligned));
+    char data[] __attribute__((aligned));
 } TargetPageDataNode;
 
 static IntervalTreeRoot targetdata_root;
@@ -847,7 +902,8 @@ void page_reset_target_data(target_ulong start, target_ulong last)
         n_last = MIN(last, n->last);
         p_len = (n_last + 1 - n_start) >> TARGET_PAGE_BITS;
 
-        memset(t->data[p_ofs], 0, p_len * TARGET_PAGE_DATA_SIZE);
+        memset(t->data + p_ofs * TARGET_PAGE_DATA_SIZE, 0,
+               p_len * TARGET_PAGE_DATA_SIZE);
     }
 }
 
@@ -855,7 +911,7 @@ void *page_get_target_data(target_ulong address)
 {
     IntervalTreeNode *n;
     TargetPageDataNode *t;
-    target_ulong page, region;
+    target_ulong page, region, p_ofs;
 
     page = address & TARGET_PAGE_MASK;
     region = address & TBD_MASK;
@@ -871,7 +927,8 @@ void *page_get_target_data(target_ulong address)
         mmap_lock();
         n = interval_tree_iter_first(&targetdata_root, page, page);
         if (!n) {
-            t = g_new0(TargetPageDataNode, 1);
+            t = g_malloc0(sizeof(TargetPageDataNode)
+                          + TPD_PAGES * TARGET_PAGE_DATA_SIZE);
             n = &t->itree;
             n->start = region;
             n->last = region | ~TBD_MASK;
@@ -881,15 +938,16 @@ void *page_get_target_data(target_ulong address)
     }
 
     t = container_of(n, TargetPageDataNode, itree);
-    return t->data[(page - region) >> TARGET_PAGE_BITS];
+    p_ofs = (page - region) >> TARGET_PAGE_BITS;
+    return t->data + p_ofs * TARGET_PAGE_DATA_SIZE;
 }
 #else
 void page_reset_target_data(target_ulong start, target_ulong last) { }
 #endif /* TARGET_PAGE_DATA_SIZE */
 
-/* The softmmu versions of these helpers are in cputlb.c.  */
+/* The system-mode versions of these helpers are in cputlb.c.  */
 
-static void *cpu_mmu_lookup(CPUArchState *env, abi_ptr addr,
+static void *cpu_mmu_lookup(CPUState *cpu, vaddr addr,
                             MemOp mop, uintptr_t ra, MMUAccessType type)
 {
     int a_bits = get_alignment_bits(mop);
@@ -897,58 +955,39 @@ static void *cpu_mmu_lookup(CPUArchState *env, abi_ptr addr,
 
     /* Enforce guest required alignment.  */
     if (unlikely(addr & ((1 << a_bits) - 1))) {
-        cpu_loop_exit_sigbus(env_cpu(env), addr, type, ra);
+        cpu_loop_exit_sigbus(cpu, addr, type, ra);
     }
 
-    ret = g2h(env_cpu(env), addr);
+    ret = g2h(cpu, addr);
     set_helper_retaddr(ra);
     return ret;
 }
 
 #include "ldst_atomicity.c.inc"
 
-static uint8_t do_ld1_mmu(CPUArchState *env, abi_ptr addr,
-                          MemOp mop, uintptr_t ra)
+static uint8_t do_ld1_mmu(CPUState *cpu, vaddr addr, MemOpIdx oi,
+                          uintptr_t ra, MMUAccessType access_type)
 {
     void *haddr;
     uint8_t ret;
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_8);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_LOAD);
+    cpu_req_mo(TCG_MO_LD_LD | TCG_MO_ST_LD);
+    haddr = cpu_mmu_lookup(cpu, addr, get_memop(oi), ra, access_type);
     ret = ldub_p(haddr);
     clear_helper_retaddr();
     return ret;
 }
 
-tcg_target_ulong helper_ldub_mmu(CPUArchState *env, uint64_t addr,
-                                 MemOpIdx oi, uintptr_t ra)
-{
-    return do_ld1_mmu(env, addr, get_memop(oi), ra);
-}
-
-tcg_target_ulong helper_ldsb_mmu(CPUArchState *env, uint64_t addr,
-                                 MemOpIdx oi, uintptr_t ra)
-{
-    return (int8_t)do_ld1_mmu(env, addr, get_memop(oi), ra);
-}
-
-uint8_t cpu_ldb_mmu(CPUArchState *env, abi_ptr addr,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    uint8_t ret = do_ld1_mmu(env, addr, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_R);
-    return ret;
-}
-
-static uint16_t do_ld2_mmu(CPUArchState *env, abi_ptr addr,
-                           MemOp mop, uintptr_t ra)
+static uint16_t do_ld2_mmu(CPUState *cpu, vaddr addr, MemOpIdx oi,
+                           uintptr_t ra, MMUAccessType access_type)
 {
     void *haddr;
     uint16_t ret;
+    MemOp mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_16);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_LOAD);
-    ret = load_atom_2(env, ra, haddr, mop);
+    cpu_req_mo(TCG_MO_LD_LD | TCG_MO_ST_LD);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, access_type);
+    ret = load_atom_2(cpu, ra, haddr, mop);
     clear_helper_retaddr();
 
     if (mop & MO_BSWAP) {
@@ -957,35 +996,16 @@ static uint16_t do_ld2_mmu(CPUArchState *env, abi_ptr addr,
     return ret;
 }
 
-tcg_target_ulong helper_lduw_mmu(CPUArchState *env, uint64_t addr,
-                                 MemOpIdx oi, uintptr_t ra)
-{
-    return do_ld2_mmu(env, addr, get_memop(oi), ra);
-}
-
-tcg_target_ulong helper_ldsw_mmu(CPUArchState *env, uint64_t addr,
-                                 MemOpIdx oi, uintptr_t ra)
-{
-    return (int16_t)do_ld2_mmu(env, addr, get_memop(oi), ra);
-}
-
-uint16_t cpu_ldw_mmu(CPUArchState *env, abi_ptr addr,
-                     MemOpIdx oi, uintptr_t ra)
-{
-    uint16_t ret = do_ld2_mmu(env, addr, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_R);
-    return ret;
-}
-
-static uint32_t do_ld4_mmu(CPUArchState *env, abi_ptr addr,
-                           MemOp mop, uintptr_t ra)
+static uint32_t do_ld4_mmu(CPUState *cpu, vaddr addr, MemOpIdx oi,
+                           uintptr_t ra, MMUAccessType access_type)
 {
     void *haddr;
     uint32_t ret;
+    MemOp mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_32);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_LOAD);
-    ret = load_atom_4(env, ra, haddr, mop);
+    cpu_req_mo(TCG_MO_LD_LD | TCG_MO_ST_LD);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, access_type);
+    ret = load_atom_4(cpu, ra, haddr, mop);
     clear_helper_retaddr();
 
     if (mop & MO_BSWAP) {
@@ -994,35 +1014,16 @@ static uint32_t do_ld4_mmu(CPUArchState *env, abi_ptr addr,
     return ret;
 }
 
-tcg_target_ulong helper_ldul_mmu(CPUArchState *env, uint64_t addr,
-                                 MemOpIdx oi, uintptr_t ra)
-{
-    return do_ld4_mmu(env, addr, get_memop(oi), ra);
-}
-
-tcg_target_ulong helper_ldsl_mmu(CPUArchState *env, uint64_t addr,
-                                 MemOpIdx oi, uintptr_t ra)
-{
-    return (int32_t)do_ld4_mmu(env, addr, get_memop(oi), ra);
-}
-
-uint32_t cpu_ldl_mmu(CPUArchState *env, abi_ptr addr,
-                     MemOpIdx oi, uintptr_t ra)
-{
-    uint32_t ret = do_ld4_mmu(env, addr, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_R);
-    return ret;
-}
-
-static uint64_t do_ld8_mmu(CPUArchState *env, abi_ptr addr,
-                           MemOp mop, uintptr_t ra)
+static uint64_t do_ld8_mmu(CPUState *cpu, vaddr addr, MemOpIdx oi,
+                           uintptr_t ra, MMUAccessType access_type)
 {
     void *haddr;
     uint64_t ret;
+    MemOp mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_64);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_LOAD);
-    ret = load_atom_8(env, ra, haddr, mop);
+    cpu_req_mo(TCG_MO_LD_LD | TCG_MO_ST_LD);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, access_type);
+    ret = load_atom_8(cpu, ra, haddr, mop);
     clear_helper_retaddr();
 
     if (mop & MO_BSWAP) {
@@ -1031,29 +1032,17 @@ static uint64_t do_ld8_mmu(CPUArchState *env, abi_ptr addr,
     return ret;
 }
 
-uint64_t helper_ldq_mmu(CPUArchState *env, uint64_t addr,
-                        MemOpIdx oi, uintptr_t ra)
-{
-    return do_ld8_mmu(env, addr, get_memop(oi), ra);
-}
-
-uint64_t cpu_ldq_mmu(CPUArchState *env, abi_ptr addr,
-                     MemOpIdx oi, uintptr_t ra)
-{
-    uint64_t ret = do_ld8_mmu(env, addr, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_R);
-    return ret;
-}
-
-static Int128 do_ld16_mmu(CPUArchState *env, abi_ptr addr,
-                          MemOp mop, uintptr_t ra)
+static Int128 do_ld16_mmu(CPUState *cpu, abi_ptr addr,
+                          MemOpIdx oi, uintptr_t ra)
 {
     void *haddr;
     Int128 ret;
+    MemOp mop = get_memop(oi);
 
     tcg_debug_assert((mop & MO_SIZE) == MO_128);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_LOAD);
-    ret = load_atom_16(env, ra, haddr, mop);
+    cpu_req_mo(TCG_MO_LD_LD | TCG_MO_ST_LD);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, MMU_DATA_LOAD);
+    ret = load_atom_16(cpu, ra, haddr, mop);
     clear_helper_retaddr();
 
     if (mop & MO_BSWAP) {
@@ -1062,164 +1051,79 @@ static Int128 do_ld16_mmu(CPUArchState *env, abi_ptr addr,
     return ret;
 }
 
-Int128 helper_ld16_mmu(CPUArchState *env, uint64_t addr,
+static void do_st1_mmu(CPUState *cpu, vaddr addr, uint8_t val,
                        MemOpIdx oi, uintptr_t ra)
-{
-    return do_ld16_mmu(env, addr, get_memop(oi), ra);
-}
-
-Int128 helper_ld_i128(CPUArchState *env, uint64_t addr, MemOpIdx oi)
-{
-    return helper_ld16_mmu(env, addr, oi, GETPC());
-}
-
-Int128 cpu_ld16_mmu(CPUArchState *env, abi_ptr addr,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    Int128 ret = do_ld16_mmu(env, addr, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_R);
-    return ret;
-}
-
-static void do_st1_mmu(CPUArchState *env, abi_ptr addr, uint8_t val,
-                       MemOp mop, uintptr_t ra)
 {
     void *haddr;
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_8);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_STORE);
+    cpu_req_mo(TCG_MO_LD_ST | TCG_MO_ST_ST);
+    haddr = cpu_mmu_lookup(cpu, addr, get_memop(oi), ra, MMU_DATA_STORE);
     stb_p(haddr, val);
     clear_helper_retaddr();
 }
 
-void helper_stb_mmu(CPUArchState *env, uint64_t addr, uint32_t val,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    do_st1_mmu(env, addr, val, get_memop(oi), ra);
-}
-
-void cpu_stb_mmu(CPUArchState *env, abi_ptr addr, uint8_t val,
-                 MemOpIdx oi, uintptr_t ra)
-{
-    do_st1_mmu(env, addr, val, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_W);
-}
-
-static void do_st2_mmu(CPUArchState *env, abi_ptr addr, uint16_t val,
-                       MemOp mop, uintptr_t ra)
+static void do_st2_mmu(CPUState *cpu, vaddr addr, uint16_t val,
+                       MemOpIdx oi, uintptr_t ra)
 {
     void *haddr;
+    MemOp mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_16);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_STORE);
+    cpu_req_mo(TCG_MO_LD_ST | TCG_MO_ST_ST);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, MMU_DATA_STORE);
 
     if (mop & MO_BSWAP) {
         val = bswap16(val);
     }
-    store_atom_2(env, ra, haddr, mop, val);
+    store_atom_2(cpu, ra, haddr, mop, val);
     clear_helper_retaddr();
 }
 
-void helper_stw_mmu(CPUArchState *env, uint64_t addr, uint32_t val,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    do_st2_mmu(env, addr, val, get_memop(oi), ra);
-}
-
-void cpu_stw_mmu(CPUArchState *env, abi_ptr addr, uint16_t val,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    do_st2_mmu(env, addr, val, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_W);
-}
-
-static void do_st4_mmu(CPUArchState *env, abi_ptr addr, uint32_t val,
-                       MemOp mop, uintptr_t ra)
+static void do_st4_mmu(CPUState *cpu, vaddr addr, uint32_t val,
+                       MemOpIdx oi, uintptr_t ra)
 {
     void *haddr;
+    MemOp mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_32);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_STORE);
+    cpu_req_mo(TCG_MO_LD_ST | TCG_MO_ST_ST);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, MMU_DATA_STORE);
 
     if (mop & MO_BSWAP) {
         val = bswap32(val);
     }
-    store_atom_4(env, ra, haddr, mop, val);
+    store_atom_4(cpu, ra, haddr, mop, val);
     clear_helper_retaddr();
 }
 
-void helper_stl_mmu(CPUArchState *env, uint64_t addr, uint32_t val,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    do_st4_mmu(env, addr, val, get_memop(oi), ra);
-}
-
-void cpu_stl_mmu(CPUArchState *env, abi_ptr addr, uint32_t val,
-                 MemOpIdx oi, uintptr_t ra)
-{
-    do_st4_mmu(env, addr, val, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_W);
-}
-
-static void do_st8_mmu(CPUArchState *env, abi_ptr addr, uint64_t val,
-                       MemOp mop, uintptr_t ra)
+static void do_st8_mmu(CPUState *cpu, vaddr addr, uint64_t val,
+                       MemOpIdx oi, uintptr_t ra)
 {
     void *haddr;
+    MemOp mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_64);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_STORE);
+    cpu_req_mo(TCG_MO_LD_ST | TCG_MO_ST_ST);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, MMU_DATA_STORE);
 
     if (mop & MO_BSWAP) {
         val = bswap64(val);
     }
-    store_atom_8(env, ra, haddr, mop, val);
+    store_atom_8(cpu, ra, haddr, mop, val);
     clear_helper_retaddr();
 }
 
-void helper_stq_mmu(CPUArchState *env, uint64_t addr, uint64_t val,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    do_st8_mmu(env, addr, val, get_memop(oi), ra);
-}
-
-void cpu_stq_mmu(CPUArchState *env, abi_ptr addr, uint64_t val,
-                    MemOpIdx oi, uintptr_t ra)
-{
-    do_st8_mmu(env, addr, val, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_W);
-}
-
-static void do_st16_mmu(CPUArchState *env, abi_ptr addr, Int128 val,
-                        MemOp mop, uintptr_t ra)
+static void do_st16_mmu(CPUState *cpu, vaddr addr, Int128 val,
+                        MemOpIdx oi, uintptr_t ra)
 {
     void *haddr;
+    MemOpIdx mop = get_memop(oi);
 
-    tcg_debug_assert((mop & MO_SIZE) == MO_128);
-    haddr = cpu_mmu_lookup(env, addr, mop, ra, MMU_DATA_STORE);
+    cpu_req_mo(TCG_MO_LD_ST | TCG_MO_ST_ST);
+    haddr = cpu_mmu_lookup(cpu, addr, mop, ra, MMU_DATA_STORE);
 
     if (mop & MO_BSWAP) {
         val = bswap128(val);
     }
-    store_atom_16(env, ra, haddr, mop, val);
+    store_atom_16(cpu, ra, haddr, mop, val);
     clear_helper_retaddr();
-}
-
-void helper_st16_mmu(CPUArchState *env, uint64_t addr, Int128 val,
-                     MemOpIdx oi, uintptr_t ra)
-{
-    do_st16_mmu(env, addr, val, get_memop(oi), ra);
-}
-
-void helper_st_i128(CPUArchState *env, uint64_t addr, Int128 val, MemOpIdx oi)
-{
-    helper_st16_mmu(env, addr, val, oi, GETPC());
-}
-
-void cpu_st16_mmu(CPUArchState *env, abi_ptr addr,
-                  Int128 val, MemOpIdx oi, uintptr_t ra)
-{
-    do_st16_mmu(env, addr, val, get_memop(oi), ra);
-    qemu_plugin_vcpu_mem_cb(env_cpu(env), addr, oi, QEMU_PLUGIN_MEM_W);
 }
 
 uint32_t cpu_ldub_code(CPUArchState *env, abi_ptr ptr)
@@ -1268,7 +1172,7 @@ uint8_t cpu_ldb_code_mmu(CPUArchState *env, abi_ptr addr,
     void *haddr;
     uint8_t ret;
 
-    haddr = cpu_mmu_lookup(env, addr, oi, ra, MMU_INST_FETCH);
+    haddr = cpu_mmu_lookup(env_cpu(env), addr, oi, ra, MMU_INST_FETCH);
     ret = ldub_p(haddr);
     clear_helper_retaddr();
     return ret;
@@ -1280,7 +1184,7 @@ uint16_t cpu_ldw_code_mmu(CPUArchState *env, abi_ptr addr,
     void *haddr;
     uint16_t ret;
 
-    haddr = cpu_mmu_lookup(env, addr, oi, ra, MMU_INST_FETCH);
+    haddr = cpu_mmu_lookup(env_cpu(env), addr, oi, ra, MMU_INST_FETCH);
     ret = lduw_p(haddr);
     clear_helper_retaddr();
     if (get_memop(oi) & MO_BSWAP) {
@@ -1295,7 +1199,7 @@ uint32_t cpu_ldl_code_mmu(CPUArchState *env, abi_ptr addr,
     void *haddr;
     uint32_t ret;
 
-    haddr = cpu_mmu_lookup(env, addr, oi, ra, MMU_INST_FETCH);
+    haddr = cpu_mmu_lookup(env_cpu(env), addr, oi, ra, MMU_INST_FETCH);
     ret = ldl_p(haddr);
     clear_helper_retaddr();
     if (get_memop(oi) & MO_BSWAP) {
@@ -1310,7 +1214,7 @@ uint64_t cpu_ldq_code_mmu(CPUArchState *env, abi_ptr addr,
     void *haddr;
     uint64_t ret;
 
-    haddr = cpu_mmu_lookup(env, addr, oi, ra, MMU_DATA_LOAD);
+    haddr = cpu_mmu_lookup(env_cpu(env), addr, oi, ra, MMU_DATA_LOAD);
     ret = ldq_p(haddr);
     clear_helper_retaddr();
     if (get_memop(oi) & MO_BSWAP) {
@@ -1324,8 +1228,8 @@ uint64_t cpu_ldq_code_mmu(CPUArchState *env, abi_ptr addr,
 /*
  * Do not allow unaligned operations to proceed.  Return the host address.
  */
-static void *atomic_mmu_lookup(CPUArchState *env, target_ulong addr,
-                               MemOpIdx oi, int size, uintptr_t retaddr)
+static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
+                               int size, uintptr_t retaddr)
 {
     MemOp mop = get_memop(oi);
     int a_bits = get_alignment_bits(mop);
@@ -1333,15 +1237,15 @@ static void *atomic_mmu_lookup(CPUArchState *env, target_ulong addr,
 
     /* Enforce guest required alignment.  */
     if (unlikely(addr & ((1 << a_bits) - 1))) {
-        cpu_loop_exit_sigbus(env_cpu(env), addr, MMU_DATA_STORE, retaddr);
+        cpu_loop_exit_sigbus(cpu, addr, MMU_DATA_STORE, retaddr);
     }
 
     /* Enforce qemu required alignment.  */
     if (unlikely(addr & (size - 1))) {
-        cpu_loop_exit_atomic(env_cpu(env), retaddr);
+        cpu_loop_exit_atomic(cpu, retaddr);
     }
 
-    ret = g2h(env_cpu(env), addr);
+    ret = g2h(cpu, addr);
     set_helper_retaddr(retaddr);
     return ret;
 }
@@ -1371,7 +1275,7 @@ static void *atomic_mmu_lookup(CPUArchState *env, target_ulong addr,
 #include "atomic_template.h"
 #endif
 
-#if defined(CONFIG_ATOMIC128) || defined(CONFIG_CMPXCHG128)
+#if defined(CONFIG_ATOMIC128) || HAVE_CMPXCHG128
 #define DATA_SIZE 16
 #include "atomic_template.h"
 #endif

@@ -30,150 +30,25 @@ typedef struct CPUArchState {
     /* GPR Register */
     uint32_t gpr_a[16];
     uint32_t gpr_d[16];
-    /* CSFR Register */
-    uint32_t PCXI;
 /* Frequently accessed PSW_USB bits are stored separately for efficiency.
        This contains all the other bits.  Use psw_{read,write} to access
        the whole PSW.  */
     uint32_t PSW;
-
-    /* PSW flag cache for faster execution
-    */
+    /* PSW flag cache for faster execution */
     uint32_t PSW_USB_C;
     uint32_t PSW_USB_V;   /* Only if bit 31 set, then flag is set  */
     uint32_t PSW_USB_SV;  /* Only if bit 31 set, then flag is set  */
     uint32_t PSW_USB_AV;  /* Only if bit 31 set, then flag is set. */
     uint32_t PSW_USB_SAV; /* Only if bit 31 set, then flag is set. */
 
-    uint32_t PC;
-    uint32_t SYSCON;
-    uint32_t CPU_ID;
-    uint32_t CORE_ID;
-    uint32_t BIV;
-    uint32_t BTV;
-    uint32_t ISP;
-    uint32_t ICR;
-    uint32_t FCX;
-    uint32_t LCX;
-    uint32_t COMPAT;
+#define R(ADDR, NAME, FEATURE) uint32_t NAME;
+#define A(ADDR, NAME, FEATURE) uint32_t NAME;
+#define E(ADDR, NAME, FEATURE) uint32_t NAME;
+#include "csfr.h.inc"
+#undef R
+#undef A
+#undef E
 
-    /* Mem Protection Register */
-    uint32_t DPR0_0L;
-    uint32_t DPR0_0U;
-    uint32_t DPR0_1L;
-    uint32_t DPR0_1U;
-    uint32_t DPR0_2L;
-    uint32_t DPR0_2U;
-    uint32_t DPR0_3L;
-    uint32_t DPR0_3U;
-
-    uint32_t DPR1_0L;
-    uint32_t DPR1_0U;
-    uint32_t DPR1_1L;
-    uint32_t DPR1_1U;
-    uint32_t DPR1_2L;
-    uint32_t DPR1_2U;
-    uint32_t DPR1_3L;
-    uint32_t DPR1_3U;
-
-    uint32_t DPR2_0L;
-    uint32_t DPR2_0U;
-    uint32_t DPR2_1L;
-    uint32_t DPR2_1U;
-    uint32_t DPR2_2L;
-    uint32_t DPR2_2U;
-    uint32_t DPR2_3L;
-    uint32_t DPR2_3U;
-
-    uint32_t DPR3_0L;
-    uint32_t DPR3_0U;
-    uint32_t DPR3_1L;
-    uint32_t DPR3_1U;
-    uint32_t DPR3_2L;
-    uint32_t DPR3_2U;
-    uint32_t DPR3_3L;
-    uint32_t DPR3_3U;
-
-    uint32_t CPR0_0L;
-    uint32_t CPR0_0U;
-    uint32_t CPR0_1L;
-    uint32_t CPR0_1U;
-    uint32_t CPR0_2L;
-    uint32_t CPR0_2U;
-    uint32_t CPR0_3L;
-    uint32_t CPR0_3U;
-
-    uint32_t CPR1_0L;
-    uint32_t CPR1_0U;
-    uint32_t CPR1_1L;
-    uint32_t CPR1_1U;
-    uint32_t CPR1_2L;
-    uint32_t CPR1_2U;
-    uint32_t CPR1_3L;
-    uint32_t CPR1_3U;
-
-    uint32_t CPR2_0L;
-    uint32_t CPR2_0U;
-    uint32_t CPR2_1L;
-    uint32_t CPR2_1U;
-    uint32_t CPR2_2L;
-    uint32_t CPR2_2U;
-    uint32_t CPR2_3L;
-    uint32_t CPR2_3U;
-
-    uint32_t CPR3_0L;
-    uint32_t CPR3_0U;
-    uint32_t CPR3_1L;
-    uint32_t CPR3_1U;
-    uint32_t CPR3_2L;
-    uint32_t CPR3_2U;
-    uint32_t CPR3_3L;
-    uint32_t CPR3_3U;
-
-    uint32_t DPM0;
-    uint32_t DPM1;
-    uint32_t DPM2;
-    uint32_t DPM3;
-
-    uint32_t CPM0;
-    uint32_t CPM1;
-    uint32_t CPM2;
-    uint32_t CPM3;
-
-    /* Memory Management Registers */
-    uint32_t MMU_CON;
-    uint32_t MMU_ASI;
-    uint32_t MMU_TVA;
-    uint32_t MMU_TPA;
-    uint32_t MMU_TPX;
-    uint32_t MMU_TFA;
-    /* {1.3.1 only */
-    uint32_t BMACON;
-    uint32_t SMACON;
-    uint32_t DIEAR;
-    uint32_t DIETR;
-    uint32_t CCDIER;
-    uint32_t MIECON;
-    uint32_t PIEAR;
-    uint32_t PIETR;
-    uint32_t CCPIER;
-    /*} */
-    /* Debug Registers */
-    uint32_t DBGSR;
-    uint32_t EXEVT;
-    uint32_t CREVT;
-    uint32_t SWEVT;
-    uint32_t TR0EVT;
-    uint32_t TR1EVT;
-    uint32_t DMS;
-    uint32_t DCX;
-    uint32_t DBGTCR;
-    uint32_t CCTRL;
-    uint32_t CCNT;
-    uint32_t ICNT;
-    uint32_t M1CNT;
-    uint32_t M2CNT;
-    uint32_t M3CNT;
     /* Floating Point Registers */
     float_status fp_status;
 
@@ -188,14 +63,17 @@ typedef struct CPUArchState {
  * A TriCore CPU.
  */
 struct ArchCPU {
-    /*< private >*/
     CPUState parent_obj;
-    /*< public >*/
 
-    CPUNegativeOffsetState neg;
     CPUTriCoreState env;
 };
 
+struct TriCoreCPUClass {
+    CPUClass parent_class;
+
+    DeviceRealize parent_realize;
+    ResettablePhases parent_phases;
+};
 
 hwaddr tricore_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 void tricore_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
@@ -263,19 +141,21 @@ void icr_set_ie(CPUTriCoreState *env, uint32_t val);
 #define MASK_DBGSR_PEVT 0x40
 #define MASK_DBGSR_EVTSRC 0x1f00
 
-#define TRICORE_HFLAG_KUU     0x3
-#define TRICORE_HFLAG_UM0     0x00002 /* user mode-0 flag          */
-#define TRICORE_HFLAG_UM1     0x00001 /* user mode-1 flag          */
-#define TRICORE_HFLAG_SM      0x00000 /* kernel mode flag          */
+enum tricore_priv_levels {
+    TRICORE_PRIV_UM0 = 0x0, /* user mode-0 flag */
+    TRICORE_PRIV_UM1 = 0x1, /* user mode-1 flag */
+    TRICORE_PRIV_SM  = 0x2, /* kernel mode flag */
+};
 
 enum tricore_features {
     TRICORE_FEATURE_13,
     TRICORE_FEATURE_131,
     TRICORE_FEATURE_16,
     TRICORE_FEATURE_161,
+    TRICORE_FEATURE_162,
 };
 
-static inline int tricore_feature(CPUTriCoreState *env, int feature)
+static inline int tricore_has_feature(CPUTriCoreState *env, int feature)
 {
     return (env->features & (1ULL << feature)) != 0;
 }
@@ -366,30 +246,25 @@ void fpu_set_state(CPUTriCoreState *env);
 
 #define MMU_USER_IDX 2
 
-void tricore_cpu_list(void);
-
-#define cpu_list tricore_cpu_list
-
-static inline int cpu_mmu_index(CPUTriCoreState *env, bool ifetch)
-{
-    return 0;
-}
-
 #include "exec/cpu-all.h"
+
+FIELD(TB_FLAGS, PRIV, 0, 2)
 
 void cpu_state_reset(CPUTriCoreState *s);
 void tricore_tcg_init(void);
 
-static inline void cpu_get_tb_cpu_state(CPUTriCoreState *env, target_ulong *pc,
-                                        target_ulong *cs_base, uint32_t *flags)
+static inline void cpu_get_tb_cpu_state(CPUTriCoreState *env, vaddr *pc,
+                                        uint64_t *cs_base, uint32_t *flags)
 {
+    uint32_t new_flags = 0;
     *pc = env->PC;
     *cs_base = 0;
-    *flags = 0;
+
+    new_flags |= FIELD_DP32(new_flags, TB_FLAGS, PRIV,
+            extract32(env->PSW, 10, 2));
+    *flags = new_flags;
 }
 
-#define TRICORE_CPU_TYPE_SUFFIX "-" TYPE_TRICORE_CPU
-#define TRICORE_CPU_TYPE_NAME(model) model TRICORE_CPU_TYPE_SUFFIX
 #define CPU_RESOLVING_TYPE TYPE_TRICORE_CPU
 
 /* helpers.c */
