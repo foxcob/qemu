@@ -1,0 +1,1 @@
+./configure --enable-debug-mutex --enable-lto --enable-pixman --enable-selinux --enable-tcg --enable-pipewire --enable-alsa --enable-spice --enable-spice-protocol --enable-sdl --enable-sdl-image --enable-kvm --enable-slirp
